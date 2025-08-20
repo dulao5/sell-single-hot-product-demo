@@ -5,14 +5,23 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"sync"
-	// "time"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
+const (
+	numProducts    = 10
+	initialStock   = 10000000
+)
+
 func main() {
+	// Seed the random number generator
+	rand.Seed(time.Now().UnixNano())
+
 	concurrency := flag.Int("concurrency", 100, "concurrent workers")
 	batchSize := flag.Int("batchsize", 10, "purchases per worker")
 	flag.Parse()
@@ -35,22 +44,23 @@ func main() {
 	db.SetMaxOpenConns(*concurrency)
 	db.SetMaxIdleConns(*concurrency)
 
-	// Initialize Schema
-	initialStock := 10000000
-	productID := 1
+	// Initialize Schema with multiple products
+	log.Println("Initializing schema for multiple products...")
 	if _, err := db.Exec("DROP TABLE IF EXISTS products"); err != nil {
 		log.Fatalf("Failed to drop table: %v", err)
 	}
-
 	createTableSQL := "CREATE TABLE products (id INT PRIMARY KEY, name VARCHAR(255), count BIGINT);"
 	if _, err := db.Exec(createTableSQL); err != nil {
 		log.Fatalf("Failed to create table: %v", err)
 	}
-
 	insertSQL := "INSERT INTO products (id, name, count) VALUES (?, ?, ?)"
-	if _, err := db.Exec(insertSQL, productID, "T-Shirt", initialStock); err != nil {
-		log.Fatalf("Failed to insert data: %v", err)
+	for i := 1; i <= numProducts; i++ {
+		productName := fmt.Sprintf("T-Shirt-%d", i)
+		if _, err := db.Exec(insertSQL, i, productName, initialStock); err != nil {
+			log.Fatalf("Failed to insert data for product %d: %v", i, err)
+		}
 	}
+	log.Printf("Initialized %d products.", numProducts)
 
 	log.Printf("Starting: %d workers, %d purchases each...", *concurrency, *batchSize)
 
@@ -60,21 +70,22 @@ func main() {
 		go func(workerID int) {
 			defer wg.Done()
 			for j := 0; j < *batchSize; j++ {
+				// Each transaction targets a random product
+				productID := rand.Intn(numProducts) + 1
+
 				tx, err := db.Begin()
 				if err != nil {
 					continue
 				}
 
 				var currentStock int64
-				// Lock the row for the entire transaction duration
 				err = tx.QueryRow("SELECT count FROM products WHERE id = ? FOR UPDATE", productID).Scan(&currentStock)
 				if err != nil {
 					tx.Rollback()
 					continue
 				}
 
-				// Simulate long-running business logic while holding the lock
-				// time.Sleep(1 * time.Millisecond)
+				// time.Sleep(500 * time.Millisecond)
 
 				if currentStock > 0 {
 					_, err = tx.Exec("UPDATE products SET count = count - 1 WHERE id = ?", productID)
@@ -85,7 +96,6 @@ func main() {
 				}
 
 				if err := tx.Commit(); err != nil {
-				    // If commit fails, the transaction is already rolled back by the driver.
 					continue
 				}
 			}
@@ -94,22 +104,25 @@ func main() {
 	wg.Wait()
 	log.Println("All workers finished.")
 
-	var finalStock int64
-	if err := db.QueryRow("SELECT count FROM products WHERE id = ?", productID).Scan(&finalStock); err != nil {
-		log.Fatalf("Failed to query final stock: %v", err)
+	// Verify the final total stock
+	var finalTotalStock int64
+	if err := db.QueryRow("SELECT SUM(count) FROM products").Scan(&finalTotalStock); err != nil {
+		log.Fatalf("Failed to query final total stock: %v", err)
 	}
 
 	totalPurchases := *concurrency * *batchSize
-	expectedStock := int64(initialStock) - int64(totalPurchases)
+	initialTotalStock := int64(initialStock) * int64(numProducts)
+	expectedTotalStock := initialTotalStock - int64(totalPurchases)
 
 	fmt.Println("-----------------------------------------")
-	fmt.Printf("Expected Final Stock: %d\n", expectedStock)
-	fmt.Printf("Actual Final Stock:   %d\n", finalStock)
+	fmt.Printf("Initial Total Stock: %d\n", initialTotalStock)
+	fmt.Printf("Expected Total Stock: %d\n", expectedTotalStock)
+	fmt.Printf("Actual Total Stock:   %d\n", finalTotalStock)
 	fmt.Println("-----------------------------------------")
 
-	if finalStock == expectedStock {
+	if finalTotalStock == expectedTotalStock {
 		log.Println("✅ Test successful! Data is consistent.")
 	} else {
-		log.Printf("❌ Test failed! Data is inconsistent. Final stock: %d, Expected: %d", finalStock, expectedStock)
+		log.Printf("❌ Test failed! Data is inconsistent. Final stock: %d, Expected: %d", finalTotalStock, expectedTotalStock)
 	}
 }
