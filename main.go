@@ -14,16 +14,18 @@ import (
 )
 
 const (
-	numProducts    = 10
-	initialStock   = 10000000
+	// initialStock is now the stock per product.
+	initialStock = 10000000
 )
 
 func main() {
 	// Seed the random number generator
 	rand.Seed(time.Now().UnixNano())
 
-	concurrency := flag.Int("concurrency", 100, "concurrent workers")
-	batchSize := flag.Int("batchsize", 10, "purchases per worker")
+	// --- Configuration Flags ---
+	concurrency := flag.Int("concurrency", 100, "Number of concurrent purchase workers")
+        batchSize := flag.Int("batchsize", 10, "Number of purchases per worker")
+	numProducts := flag.Int("products", 1, "Number of distinct products (rows) to simulate")
 	flag.Parse()
 
 	dsn := os.Getenv("DB_DSN")
@@ -44,8 +46,8 @@ func main() {
 	db.SetMaxOpenConns(*concurrency)
 	db.SetMaxIdleConns(*concurrency)
 
-	// Initialize Schema with multiple products
-	log.Println("Initializing schema for multiple products...")
+	// --- Schema Initialization ---
+	log.Printf("Initializing schema for %d products...", *numProducts)
 	if _, err := db.Exec("DROP TABLE IF EXISTS products"); err != nil {
 		log.Fatalf("Failed to drop table: %v", err)
 	}
@@ -54,15 +56,16 @@ func main() {
 		log.Fatalf("Failed to create table: %v", err)
 	}
 	insertSQL := "INSERT INTO products (id, name, count) VALUES (?, ?, ?)"
-	for i := 1; i <= numProducts; i++ {
+	for i := 1; i <= *numProducts; i++ {
 		productName := fmt.Sprintf("T-Shirt-%d", i)
 		if _, err := db.Exec(insertSQL, i, productName, initialStock); err != nil {
 			log.Fatalf("Failed to insert data for product %d: %v", i, err)
 		}
 	}
-	log.Printf("Initialized %d products.", numProducts)
+	log.Printf("Initialized %d products.", *numProducts)
 
-	log.Printf("Starting: %d workers, %d purchases each...", *concurrency, *batchSize)
+	// --- Simulation ---
+	log.Printf("Starting: %d workers, %d purchases each, across %d products...", *concurrency, *batchSize, *numProducts)
 
 	var wg sync.WaitGroup
 	for i := 0; i < *concurrency; i++ {
@@ -70,8 +73,7 @@ func main() {
 		go func(workerID int) {
 			defer wg.Done()
 			for j := 0; j < *batchSize; j++ {
-				// Each transaction targets a random product
-				productID := rand.Intn(numProducts) + 1
+				productID := rand.Intn(*numProducts) + 1
 
 				tx, err := db.Begin()
 				if err != nil {
@@ -84,8 +86,6 @@ func main() {
 					tx.Rollback()
 					continue
 				}
-
-				// time.Sleep(500 * time.Millisecond)
 
 				if currentStock > 0 {
 					_, err = tx.Exec("UPDATE products SET count = count - 1 WHERE id = ?", productID)
@@ -104,18 +104,19 @@ func main() {
 	wg.Wait()
 	log.Println("All workers finished.")
 
-	// Verify the final total stock
+	// --- Verification ---
 	var finalTotalStock int64
 	if err := db.QueryRow("SELECT SUM(count) FROM products").Scan(&finalTotalStock); err != nil {
 		log.Fatalf("Failed to query final total stock: %v", err)
 	}
 
 	totalPurchases := *concurrency * *batchSize
-	initialTotalStock := int64(initialStock) * int64(numProducts)
+	initialTotalStock := int64(initialStock) * int64(*numProducts)
 	expectedTotalStock := initialTotalStock - int64(totalPurchases)
 
 	fmt.Println("-----------------------------------------")
-	fmt.Printf("Initial Total Stock: %d\n", initialTotalStock)
+	fmt.Printf("Products:             %d\n", *numProducts)
+	fmt.Printf("Initial Total Stock:  %d\n", initialTotalStock)
 	fmt.Printf("Expected Total Stock: %d\n", expectedTotalStock)
 	fmt.Printf("Actual Total Stock:   %d\n", finalTotalStock)
 	fmt.Println("-----------------------------------------")
